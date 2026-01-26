@@ -64,10 +64,10 @@ class SimulateRequest(BaseModel):
 
 
 class BusResult(BaseModel):
-    vm_pu: float
-    va_degree: float
-    p_mw: float
-    q_mvar: float
+    vm_pu: Optional[float] = None
+    va_degree: Optional[float] = None
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class ValidationError(BaseModel):
@@ -85,67 +85,67 @@ class CreationStatus(BaseModel):
 
 
 class LoadResult(BaseModel):
-    p_mw: float
-    q_mvar: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class GenResult(BaseModel):
-    p_mw: float
-    q_mvar: float
-    vm_pu: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
+    vm_pu: Optional[float] = None
 
 
 class SGenResult(BaseModel):
-    p_mw: float
-    q_mvar: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class MotorResult(BaseModel):
-    p_mw: float
-    q_mvar: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class ShuntResult(BaseModel):
-    p_mw: float
-    q_mvar: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class StorageResult(BaseModel):
-    p_mw: float
-    q_mvar: float
+    p_mw: Optional[float] = None
+    q_mvar: Optional[float] = None
 
 
 class LineResult(BaseModel):
-    p_from_mw: float
-    q_from_mvar: float
-    p_to_mw: float
-    q_to_mvar: float
-    i_from_ka: float
-    i_to_ka: float
-    loading_percent: float
+    p_from_mw: Optional[float] = None
+    q_from_mvar: Optional[float] = None
+    p_to_mw: Optional[float] = None
+    q_to_mvar: Optional[float] = None
+    i_from_ka: Optional[float] = None
+    i_to_ka: Optional[float] = None
+    loading_percent: Optional[float] = None
 
 
 class TrafoResult(BaseModel):
-    p_hv_mw: float
-    q_hv_mvar: float
-    p_lv_mw: float
-    q_lv_mvar: float
-    i_hv_ka: float
-    i_lv_ka: float
-    loading_percent: float
+    p_hv_mw: Optional[float] = None
+    q_hv_mvar: Optional[float] = None
+    p_lv_mw: Optional[float] = None
+    q_lv_mvar: Optional[float] = None
+    i_hv_ka: Optional[float] = None
+    i_lv_ka: Optional[float] = None
+    loading_percent: Optional[float] = None
 
 
 class Trafo3WResult(BaseModel):
-    p_hv_mw: float
-    q_hv_mvar: float
-    p_mv_mw: float
-    q_mv_mvar: float
-    p_lv_mw: float
-    q_lv_mvar: float
-    i_hv_ka: float
-    i_mv_ka: float
-    i_lv_ka: float
-    loading_percent: float
+    p_hv_mw: Optional[float] = None
+    q_hv_mvar: Optional[float] = None
+    p_mv_mw: Optional[float] = None
+    q_mv_mvar: Optional[float] = None
+    p_lv_mw: Optional[float] = None
+    q_lv_mvar: Optional[float] = None
+    i_hv_ka: Optional[float] = None
+    i_mv_ka: Optional[float] = None
+    i_lv_ka: Optional[float] = None
+    loading_percent: Optional[float] = None
 
 
 class Summary(BaseModel):

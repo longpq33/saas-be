@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List
 
 import pandapower as pp
+
+
+def _to_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def _collect_simulation_results(
@@ -53,8 +64,8 @@ def _collect_simulation_results(
                 continue
             row = net.res_load.loc[idx]
             results["loads"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
             }
 
     # Collect gen results
@@ -67,9 +78,9 @@ def _collect_simulation_results(
                 continue
             row = net.res_gen.loc[idx]
             results["gens"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
-                "vm_pu": float(row.get("vm_pu", 1.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
+                "vm_pu": _to_optional_float(row.get("vm_pu", 1.0)),
             }
 
     # Collect sgen results
@@ -82,8 +93,8 @@ def _collect_simulation_results(
                 continue
             row = net.res_sgen.loc[idx]
             results["sgens"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
             }
 
     # Collect motor results
@@ -96,8 +107,8 @@ def _collect_simulation_results(
                 continue
             row = net.res_motor.loc[idx]
             results["motors"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
             }
 
     # Collect shunt results
@@ -110,8 +121,8 @@ def _collect_simulation_results(
                 continue
             row = net.res_shunt.loc[idx]
             results["shunts"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
             }
 
     # Collect storage results
@@ -124,8 +135,8 @@ def _collect_simulation_results(
                 continue
             row = net.res_storage.loc[idx]
             results["storages"][node_id] = {
-                "p_mw": float(row.get("p_mw", 0.0)),
-                "q_mvar": float(row.get("q_mvar", 0.0)),
+                "p_mw": _to_optional_float(row.get("p_mw", 0.0)),
+                "q_mvar": _to_optional_float(row.get("q_mvar", 0.0)),
             }
 
     # Collect line results
@@ -138,13 +149,13 @@ def _collect_simulation_results(
                 continue
             row = net.res_line.loc[idx]
             results["lines"][edge_id] = {
-                "p_from_mw": float(row.get("p_from_mw", 0.0)),
-                "q_from_mvar": float(row.get("q_from_mvar", 0.0)),
-                "p_to_mw": float(row.get("p_to_mw", 0.0)),
-                "q_to_mvar": float(row.get("q_to_mvar", 0.0)),
-                "i_from_ka": float(row.get("i_from_ka", 0.0)),
-                "i_to_ka": float(row.get("i_to_ka", 0.0)),
-                "loading_percent": float(row.get("loading_percent", 0.0)),
+                "p_from_mw": _to_optional_float(row.get("p_from_mw", 0.0)),
+                "q_from_mvar": _to_optional_float(row.get("q_from_mvar", 0.0)),
+                "p_to_mw": _to_optional_float(row.get("p_to_mw", 0.0)),
+                "q_to_mvar": _to_optional_float(row.get("q_to_mvar", 0.0)),
+                "i_from_ka": _to_optional_float(row.get("i_from_ka", 0.0)),
+                "i_to_ka": _to_optional_float(row.get("i_to_ka", 0.0)),
+                "loading_percent": _to_optional_float(row.get("loading_percent", 0.0)),
             }
 
     # Collect trafo results
@@ -157,13 +168,13 @@ def _collect_simulation_results(
                 continue
             row = net.res_trafo.loc[idx]
             results["trafos"][node_id] = {
-                "p_hv_mw": float(row.get("p_hv_mw", 0.0)),
-                "q_hv_mvar": float(row.get("q_hv_mvar", 0.0)),
-                "p_lv_mw": float(row.get("p_lv_mw", 0.0)),
-                "q_lv_mvar": float(row.get("q_lv_mvar", 0.0)),
-                "i_hv_ka": float(row.get("i_hv_ka", 0.0)),
-                "i_lv_ka": float(row.get("i_lv_ka", 0.0)),
-                "loading_percent": float(row.get("loading_percent", 0.0)),
+                "p_hv_mw": _to_optional_float(row.get("p_hv_mw", 0.0)),
+                "q_hv_mvar": _to_optional_float(row.get("q_hv_mvar", 0.0)),
+                "p_lv_mw": _to_optional_float(row.get("p_lv_mw", 0.0)),
+                "q_lv_mvar": _to_optional_float(row.get("q_lv_mvar", 0.0)),
+                "i_hv_ka": _to_optional_float(row.get("i_hv_ka", 0.0)),
+                "i_lv_ka": _to_optional_float(row.get("i_lv_ka", 0.0)),
+                "loading_percent": _to_optional_float(row.get("loading_percent", 0.0)),
             }
 
     # Collect trafo3w results
@@ -176,16 +187,16 @@ def _collect_simulation_results(
                 continue
             row = net.res_trafo3w.loc[idx]
             results["trafo3ws"][node_id] = {
-                "p_hv_mw": float(row.get("p_hv_mw", 0.0)),
-                "q_hv_mvar": float(row.get("q_hv_mvar", 0.0)),
-                "p_mv_mw": float(row.get("p_mv_mw", 0.0)),
-                "q_mv_mvar": float(row.get("q_mv_mvar", 0.0)),
-                "p_lv_mw": float(row.get("p_lv_mw", 0.0)),
-                "q_lv_mvar": float(row.get("q_lv_mvar", 0.0)),
-                "i_hv_ka": float(row.get("i_hv_ka", 0.0)),
-                "i_mv_ka": float(row.get("i_mv_ka", 0.0)),
-                "i_lv_ka": float(row.get("i_lv_ka", 0.0)),
-                "loading_percent": float(row.get("loading_percent", 0.0)),
+                "p_hv_mw": _to_optional_float(row.get("p_hv_mw", 0.0)),
+                "q_hv_mvar": _to_optional_float(row.get("q_hv_mvar", 0.0)),
+                "p_mv_mw": _to_optional_float(row.get("p_mv_mw", 0.0)),
+                "q_mv_mvar": _to_optional_float(row.get("q_mv_mvar", 0.0)),
+                "p_lv_mw": _to_optional_float(row.get("p_lv_mw", 0.0)),
+                "q_lv_mvar": _to_optional_float(row.get("q_lv_mvar", 0.0)),
+                "i_hv_ka": _to_optional_float(row.get("i_hv_ka", 0.0)),
+                "i_mv_ka": _to_optional_float(row.get("i_mv_ka", 0.0)),
+                "i_lv_ka": _to_optional_float(row.get("i_lv_ka", 0.0)),
+                "loading_percent": _to_optional_float(row.get("loading_percent", 0.0)),
             }
 
     return results

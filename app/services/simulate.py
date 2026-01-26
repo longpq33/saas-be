@@ -1,370 +1,441 @@
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Dict, List
 
 import pandapower as pp
 
-from app.helper.network_creation import (
-    _add_buses,
-    _add_ext_grids,
-    _add_gens,
-    _add_lines_from_edges,
-    _add_loads,
-    _add_motors,
-    _add_sgens,
-    _add_shunts,
-    _add_storages,
-    _add_switches,
-    _add_trafo3w,
-    _add_transformers,
-    _ensure_slack,
-)
-from app.helper.result_collection import _collect_simulation_results
-from app.helper.validation import _validate_network
+from app.helper import network_creation, result_collection, validation
 from app.models.schemas import (
+    BusResult,
+    CreationStatus,
     SimulateRequest,
     SimulateResponse,
-    CreationStatus,
+    Summary,
+    ValidationError,
 )
 
+def _to_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
-def simulate_from_reactflow(req: SimulateRequest) -> SimulateResponse:
-    start = time.perf_counter()
-    warnings: List[str] = []
-    all_creation_failed: List[CreationStatus] = []
+
+def _sanitize_json_floats(obj: Any) -> Any:
+    """Đảm bảo JSON hợp lệ: thay NaN/Infinity thành None (null)."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, list):
+        return [_sanitize_json_floats(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_json_floats(v) for k, v in obj.items()}
+    return obj
+
+
+def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
+    """
+    Tạo grid power từ ReactFlow nodes/edges và chạy power flow simulation theo pandapower.
+
+    Luồng xử lý:
+    1. Chuẩn hoá và tách nodes/edges theo type
+    2. Tạo network rỗng với pp.create_empty_network
+    3. Tạo buses trước tiên
+    4. Validate network
+    5. Tạo các phần tử theo thứ tự: lines, transformers, ext_grids, loads/gens/etc, switches
+    6. Chạy pp.runpp với settings
+    7. Gom kết quả và trả về SimulateResponse
+    """
+    start_time = time.time()
+
+    # 1. Chuẩn hoá dữ liệu: convert Pydantic models sang dict
+    nodes_dict = [node.model_dump() for node in request.nodes]
+    edges_dict = []
+    for i, edge in enumerate(request.edges):
+        edge_dict = edge.model_dump()
+        # Đảm bảo mỗi edge có id (fallback nếu không có)
+        if not edge_dict.get("id"):
+            edge_dict["id"] = f"edge_{i}"
+        edges_dict.append(edge_dict)
+
+    # Tách nodes theo type
+    bus_nodes = [n for n in nodes_dict if n.get("type") == "bus"]
+    ext_grid_nodes = [n for n in nodes_dict if n.get("type") == "ext_grid"]
+    load_nodes = [n for n in nodes_dict if n.get("type") == "load"]
+    gen_nodes = [n for n in nodes_dict if n.get("type") == "gen"]
+    sgen_nodes = [n for n in nodes_dict if n.get("type") == "sgen"]
+    motor_nodes = [n for n in nodes_dict if n.get("type") == "motor"]
+    shunt_nodes = [n for n in nodes_dict if n.get("type") == "shunt"]
+    storage_nodes = [n for n in nodes_dict if n.get("type") == "storage"]
+    transformer_nodes = [n for n in nodes_dict if n.get("type") == "transformer"]
+    trafo3w_nodes = [n for n in nodes_dict if n.get("type") == "trafo3w"]
+    switch_nodes = [n for n in nodes_dict if n.get("type") == "switch"]
+
+    # Khởi tạo các biến để track kết quả
     element_status: Dict[str, CreationStatus] = {}
+    errors: Dict[str, List[ValidationError]] = {}
+    warnings: List[str] = []
+    converged = False
+    slack_bus_id = ""
 
-    # Parse nodes and edges
-    all_nodes = [n.model_dump() for n in req.nodes]
-    bus_nodes = [n for n in all_nodes if n.get("type") == "bus"]
-    load_nodes = [n for n in all_nodes if n.get("type") == "load"]
-    ext_grid_nodes = [n for n in all_nodes if n.get("type") == "ext_grid"]
-    gen_nodes = [n for n in all_nodes if n.get("type") == "gen"]
-    sgen_nodes = [n for n in all_nodes if n.get("type") == "sgen"]
-    motor_nodes = [n for n in all_nodes if n.get("type") == "motor"]
-    shunt_nodes = [n for n in all_nodes if n.get("type") == "shunt"]
-    storage_nodes = [n for n in all_nodes if n.get("type") == "storage"]
-    transformer_nodes = [n for n in all_nodes if n.get("type") == "transformer"]
-    trafo3w_nodes = [n for n in all_nodes if n.get("type") == "trafo3w"]
-    switch_nodes = [n for n in all_nodes if n.get("type") == "switch"]
-    edges = [e.model_dump() for e in req.edges]
-
-    # Create network and add buses first
-    net = pp.create_empty_network()
-    bus_index_by_node_id, _ = _add_buses(net, bus_nodes)
-
-    # Validate network before creating elements
-    validation_errors = _validate_network(all_nodes, edges, bus_index_by_node_id)
-
-    # If validation errors exist, return early with errors
-    if validation_errors:
-        slack_bus_id = ""
-        if ext_grid_nodes:
-            first_ext_grid = ext_grid_nodes[0]
-            slack_bus_id = str(first_ext_grid.get("data", {}).get("busId", ""))
-
-        return SimulateResponse(
-            summary={
-                "converged": False,
-                "runtime_ms": int((time.perf_counter() - start) * 1000),
-                "slack_bus_id": slack_bus_id,
-            },
-            bus_by_id={},
-            res_bus=[],
-            warnings=warnings,
-            errors={"validation": [e.model_dump() for e in validation_errors], "creation": [], "simulation": []},
-            element_status={},
-            results={},
-        )
-
-    # Track element indices for results collection
+    # Mapping indices cho các phần tử
+    bus_index_by_node_id: Dict[str, int] = {}
+    line_index_by_edge_id: Dict[str, int] = {}
+    trafo_index_by_node_id: Dict[str, int] = {}
+    trafo3w_index_by_node_id: Dict[str, int] = {}
     load_index_by_node_id: Dict[str, int] = {}
     gen_index_by_node_id: Dict[str, int] = {}
     sgen_index_by_node_id: Dict[str, int] = {}
     motor_index_by_node_id: Dict[str, int] = {}
     shunt_index_by_node_id: Dict[str, int] = {}
     storage_index_by_node_id: Dict[str, int] = {}
-    trafo3w_index_by_node_id: Dict[str, int] = {}
 
-    # Add elements and track creation status
-    _, failed = _add_loads(net, load_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful loads
-    for node in load_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            # Find the index in net.load
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                # Find matching load by bus
-                for idx in net.load.index:
-                    if net.load.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        load_index_by_node_id[node_id] = int(idx)
-                        break
+    # Lists để track node/edge IDs cho result collection
+    load_node_ids: List[str] = [n["id"] for n in load_nodes]
+    gen_node_ids: List[str] = [n["id"] for n in gen_nodes]
+    sgen_node_ids: List[str] = [n["id"] for n in sgen_nodes]
+    motor_node_ids: List[str] = [n["id"] for n in motor_nodes]
+    shunt_node_ids: List[str] = [n["id"] for n in shunt_nodes]
+    storage_node_ids: List[str] = [n["id"] for n in storage_nodes]
+    transformer_node_ids: List[str] = [n["id"] for n in transformer_nodes]
+    trafo3w_node_ids: List[str] = [n["id"] for n in trafo3w_nodes]
+    line_edge_ids: List[str] = [e["id"] for e in edges_dict]
 
-    _, failed = _add_ext_grids(net, ext_grid_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
+    try:
+        # 2. Tạo network rỗng
+        net = pp.create_empty_network()
 
-    _, failed = _add_gens(net, gen_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful gens
-    for node in gen_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                for idx in net.gen.index:
-                    if net.gen.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        gen_index_by_node_id[node_id] = int(idx)
-                        break
+        # 3. Tạo buses trước tiên
+        if not bus_nodes:
+            errors["validation"] = [
+                ValidationError(
+                    element_id="",
+                    element_type="network",
+                    field="bus",
+                    message="At least one bus is required",
+                )
+            ]
+            return _build_error_response(
+                start_time, errors, element_status, warnings, slack_bus_id
+            )
 
-    _, failed = _add_sgens(net, sgen_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful sgens
-    for node in sgen_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                for idx in net.sgen.index:
-                    if net.sgen.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        sgen_index_by_node_id[node_id] = int(idx)
-                        break
+        bus_index_by_node_id, slack_bus_id = network_creation._add_buses(net, bus_nodes)
 
-    _, failed = _add_motors(net, motor_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful motors
-    for node in motor_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                for idx in net.motor.index:
-                    if net.motor.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        motor_index_by_node_id[node_id] = int(idx)
-                        break
+        # 4. Validate network
+        validation_errors = validation._validate_network(nodes_dict, edges_dict, bus_index_by_node_id)
+        if validation_errors:
+            errors["validation"] = validation_errors
 
-    _, failed = _add_shunts(net, shunt_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful shunts
-    for node in shunt_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                for idx in net.shunt.index:
-                    if net.shunt.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        shunt_index_by_node_id[node_id] = int(idx)
-                        break
+        # 5. Tạo các phần tử theo thứ tự phụ thuộc
 
-    _, failed = _add_storages(net, storage_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful storages
-    for node in storage_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            bus_id = str(node.get("data", {}).get("busId", ""))
-            if bus_id in bus_index_by_node_id:
-                for idx in net.storage.index:
-                    if net.storage.loc[idx, "bus"] == bus_index_by_node_id[bus_id]:
-                        storage_index_by_node_id[node_id] = int(idx)
-                        break
+        # (a) Lines từ edges
+        line_edges, line_failed = network_creation._add_lines_from_edges(
+            net, edges_dict, bus_index_by_node_id
+        )
+        for line_idx, edge_id, _ in line_edges:
+            line_index_by_edge_id[edge_id] = line_idx
+            # Track thành công
+            element_status[edge_id] = CreationStatus(
+                element_id=edge_id, element_type="line", success=True, error=None
+            )
+        for status in line_failed:
+            element_status[status.element_id] = status
 
-    line_edges, failed = _add_lines_from_edges(net, edges, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    line_index_by_edge_id = {edge_id: line_idx for line_idx, edge_id, _ in line_edges}
+        # (b) Transformers (2-winding)
+        trafo_edges, trafo_failed = network_creation._add_transformers(
+            net, transformer_nodes, bus_index_by_node_id
+        )
+        for trafo_idx, node_id, _ in trafo_edges:
+            trafo_index_by_node_id[node_id] = trafo_idx
+            # Track thành công
+            element_status[node_id] = CreationStatus(
+                element_id=node_id, element_type="transformer", success=True, error=None
+            )
+        for status in trafo_failed:
+            element_status[status.element_id] = status
 
-    trafo_edges, failed = _add_transformers(net, transformer_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    trafo_index_by_node_id = {node_id: trafo_idx for trafo_idx, node_id, _ in trafo_edges}
+        # Trafo3W
+        trafo3w_count_before = len(net.trafo3w) if hasattr(net, "trafo3w") else 0
+        trafo3w_success, trafo3w_failed = network_creation._add_trafo3w(
+            net, trafo3w_nodes, bus_index_by_node_id
+        )
+        # Build trafo3w_index_by_node_id theo thứ tự tạo
+        trafo3w_idx = trafo3w_count_before
+        for node in trafo3w_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in trafo3w_failed):
+                continue
+            if trafo3w_idx < len(net.trafo3w):
+                trafo3w_index_by_node_id[node_id] = int(net.trafo3w.index[trafo3w_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="trafo3w", success=True, error=None
+                )
+                trafo3w_idx += 1
+        for status in trafo3w_failed:
+            element_status[status.element_id] = status
 
-    _, failed = _add_trafo3w(net, trafo3w_nodes, bus_index_by_node_id)
-    all_creation_failed.extend(failed)
-    # Track successful trafo3w
-    for node in trafo3w_nodes:
-        node_id = node.get("id", "")
-        if node_id not in [f.element_id for f in failed]:
-            data = node.get("data", {})
-            hv_bus_id = str(data.get("hvBusId", ""))
-            if hv_bus_id in bus_index_by_node_id:
-                for idx in net.trafo3w.index:
-                    if net.trafo3w.loc[idx, "hv_bus"] == bus_index_by_node_id[hv_bus_id]:
-                        trafo3w_index_by_node_id[node_id] = int(idx)
-                        break
+        # (c) Slack/External grid
+        ext_grid_success, ext_grid_failed = network_creation._add_ext_grids(
+            net, ext_grid_nodes, bus_index_by_node_id
+        )
+        # Track thành công cho ext_grid
+        for node in ext_grid_nodes:
+            node_id = node.get("id", "")
+            if not any(status.element_id == node_id for status in ext_grid_failed):
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="ext_grid", success=True, error=None
+                )
+        for status in ext_grid_failed:
+            element_status[status.element_id] = status
 
-    # Create switches from line edges (if switch config in edge.data)
-    for line_idx, edge_id, edge_data in line_edges:
-        switch_data = edge_data.get("switch")
-        if not switch_data or not switch_data.get("enabled"):
-            continue
-
-        switch_side = str(switch_data.get("side", "source"))
-        edge = next((e for e in edges if e.get("id") == edge_id), None)
-        if not edge:
-            continue
-
-        switch_bus_id = edge.get("source") if switch_side == "source" else edge.get("target")
-        if not switch_bus_id or switch_bus_id not in bus_index_by_node_id:
-            continue
+        # Xác định slack_bus_id từ ext_grid đầu tiên
+        if ext_grid_nodes:
+            first_ext_grid = ext_grid_nodes[0]
+            first_ext_grid_bus_id = str(first_ext_grid.get("data", {}).get("busId", ""))
+            if first_ext_grid_bus_id and first_ext_grid_bus_id in bus_index_by_node_id:
+                slack_bus_id = first_ext_grid_bus_id
 
         try:
-            pp.create_switch(
-                net,
-                bus=bus_index_by_node_id[switch_bus_id],
-                element=line_idx,
-                et="l",
-                closed=bool(switch_data.get("closed", True)),
-                type=str(switch_data.get("type", "")) if switch_data.get("type") else None,
-                z_ohm=float(switch_data.get("z_ohm", 0.0)) if switch_data.get("z_ohm") is not None else None,
-                in_service=bool(switch_data.get("in_service", True)),
-            )
-        except Exception as e:  # noqa: BLE001
-            all_creation_failed.append(
-                CreationStatus(
-                    element_id=edge_id,
-                    element_type="switch",
-                    success=False,
-                    error=str(e),
+            network_creation._ensure_slack(net)
+        except ValueError as e:
+            errors.setdefault("network", []).append(
+                ValidationError(
+                    element_id="",
+                    element_type="network",
+                    field="ext_grid",
+                    message=str(e),
                 )
             )
 
-    # Create switches from switch nodes
-    _, failed = _add_switches(net, switch_nodes, bus_index_by_node_id, line_index_by_edge_id, trafo_index_by_node_id)
-    all_creation_failed.extend(failed)
-
-    # Build element_status dict
-    for node in all_nodes:
-        node_id = node.get("id", "")
-        node_type = node.get("type", "")
-        failed_status = next((f for f in all_creation_failed if f.element_id == node_id), None)
-        if failed_status:
-            element_status[node_id] = failed_status
-        else:
-            element_status[node_id] = CreationStatus(
-                element_id=node_id,
-                element_type=node_type,
-                success=True,
-                error=None,
-            )
-
-    # Also track edge status
-    for edge in edges:
-        edge_id = edge.get("id", "")
-        failed_status = next((f for f in all_creation_failed if f.element_id == edge_id), None)
-        if failed_status:
-            element_status[edge_id] = failed_status
-        else:
-            element_status[edge_id] = CreationStatus(
-                element_id=edge_id,
-                element_type="line",
-                success=True,
-                error=None,
-            )
-
-    try:
-        _ensure_slack(net)
-    except ValueError as e:
-        warnings.append(str(e))
-        return SimulateResponse(
-            summary={
-                "converged": False,
-                "runtime_ms": int((time.perf_counter() - start) * 1000),
-                "slack_bus_id": "",
-            },
-            bus_by_id={},
-            res_bus=[],
-            warnings=warnings,
-            errors={
-                "validation": [],
-                "creation": [f.model_dump() for f in all_creation_failed],
-                "simulation": [str(e)],
-            },
-            element_status={k: v.model_dump() for k, v in element_status.items()},
-            results={},
-        )
-
-    converged = False
-    try:
-        pp.runpp(
-            net,
-            algorithm=req.settings.algorithm,
-            max_iteration=req.settings.max_iter,
-            tolerance_mva=req.settings.tolerance_mva,
-            init="auto",
-        )
-        converged = bool(net.get("converged", False))
-    except Exception as e:  # noqa: BLE001
-        warnings.append(str(e))
-
-    runtime_ms = int((time.perf_counter() - start) * 1000)
-
-    # Collect simulation results
-    simulation_errors: List[str] = []
-    if not converged:
-        simulation_errors.append("Power flow did not converge")
-
-    results = _collect_simulation_results(
-        net=net,
-        converged=converged,
-        load_node_ids=[n.get("id", "") for n in load_nodes],
-        gen_node_ids=[n.get("id", "") for n in gen_nodes],
-        sgen_node_ids=[n.get("id", "") for n in sgen_nodes],
-        motor_node_ids=[n.get("id", "") for n in motor_nodes],
-        shunt_node_ids=[n.get("id", "") for n in shunt_nodes],
-        storage_node_ids=[n.get("id", "") for n in storage_nodes],
-        line_edge_ids=[e.get("id", "") for e in edges],
-        trafo_node_ids=[n.get("id", "") for n in transformer_nodes],
-        trafo3w_node_ids=[n.get("id", "") for n in trafo3w_nodes],
-        load_index_by_node_id=load_index_by_node_id,
-        gen_index_by_node_id=gen_index_by_node_id,
-        sgen_index_by_node_id=sgen_index_by_node_id,
-        motor_index_by_node_id=motor_index_by_node_id,
-        shunt_index_by_node_id=shunt_index_by_node_id,
-        storage_index_by_node_id=storage_index_by_node_id,
-        line_index_by_edge_id=line_index_by_edge_id,
-        trafo_index_by_node_id=trafo_index_by_node_id,
-        trafo3w_index_by_node_id=trafo3w_index_by_node_id,
-    )
-
-    bus_by_id: Dict[str, Dict[str, Any]] = {}
-    if converged and hasattr(net, "res_bus"):
-        for node_id, bus_idx in bus_index_by_node_id.items():
-            if bus_idx not in net.res_bus.index:
+        # (d) Loads / Gens / SGens / Motors / Shunts / Storages
+        # Loads
+        load_count_before = len(net.load) if hasattr(net, "load") else 0
+        load_success, load_failed = network_creation._add_loads(net, load_nodes, bus_index_by_node_id)
+        # Build load_index_by_node_id: map theo thứ tự tạo (chỉ các node thành công)
+        load_idx = load_count_before
+        for node in load_nodes:
+            node_id = node.get("id", "")
+            # Skip nếu node này failed
+            if any(status.element_id == node_id for status in load_failed):
                 continue
-            row = net.res_bus.loc[bus_idx]
-            bus_by_id[node_id] = {
-                "vm_pu": float(row.get("vm_pu")),
-                "va_degree": float(row.get("va_degree")),
-                "p_mw": float(row.get("p_mw")),
-                "q_mvar": float(row.get("q_mvar")),
-            }
+            if load_idx < len(net.load):
+                load_index_by_node_id[node_id] = int(net.load.index[load_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="load", success=True, error=None
+                )
+                load_idx += 1
+        for status in load_failed:
+            element_status[status.element_id] = status
 
-    res_bus_records: List[Dict[str, Any]] = []
-    if converged and hasattr(net, "res_bus"):
-        res_bus_records = net.res_bus.reset_index().to_dict(orient="records")
+        # Gens
+        gen_count_before = len(net.gen) if hasattr(net, "gen") else 0
+        gen_success, gen_failed = network_creation._add_gens(net, gen_nodes, bus_index_by_node_id)
+        gen_idx = gen_count_before
+        for node in gen_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in gen_failed):
+                continue
+            if gen_idx < len(net.gen):
+                gen_index_by_node_id[node_id] = int(net.gen.index[gen_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="gen", success=True, error=None
+                )
+                gen_idx += 1
+        for status in gen_failed:
+            element_status[status.element_id] = status
 
-    # Get first ext_grid bus as slack_bus_id for summary
-    slack_bus_id = ""
-    if ext_grid_nodes:
-        first_ext_grid = ext_grid_nodes[0]
-        slack_bus_id = str(first_ext_grid.get("data", {}).get("busId", ""))
+        # SGens
+        sgen_count_before = len(net.sgen) if hasattr(net, "sgen") else 0
+        sgen_success, sgen_failed = network_creation._add_sgens(net, sgen_nodes, bus_index_by_node_id)
+        sgen_idx = sgen_count_before
+        for node in sgen_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in sgen_failed):
+                continue
+            if sgen_idx < len(net.sgen):
+                sgen_index_by_node_id[node_id] = int(net.sgen.index[sgen_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="sgen", success=True, error=None
+                )
+                sgen_idx += 1
+        for status in sgen_failed:
+            element_status[status.element_id] = status
 
+        # Motors
+        motor_count_before = len(net.motor) if hasattr(net, "motor") else 0
+        motor_success, motor_failed = network_creation._add_motors(net, motor_nodes, bus_index_by_node_id)
+        motor_idx = motor_count_before
+        for node in motor_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in motor_failed):
+                continue
+            if motor_idx < len(net.motor):
+                motor_index_by_node_id[node_id] = int(net.motor.index[motor_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="motor", success=True, error=None
+                )
+                motor_idx += 1
+        for status in motor_failed:
+            element_status[status.element_id] = status
+
+        # Shunts
+        shunt_count_before = len(net.shunt) if hasattr(net, "shunt") else 0
+        shunt_success, shunt_failed = network_creation._add_shunts(net, shunt_nodes, bus_index_by_node_id)
+        shunt_idx = shunt_count_before
+        for node in shunt_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in shunt_failed):
+                continue
+            if shunt_idx < len(net.shunt):
+                shunt_index_by_node_id[node_id] = int(net.shunt.index[shunt_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="shunt", success=True, error=None
+                )
+                shunt_idx += 1
+        for status in shunt_failed:
+            element_status[status.element_id] = status
+
+        # Storages
+        storage_count_before = len(net.storage) if hasattr(net, "storage") else 0
+        storage_success, storage_failed = network_creation._add_storages(
+            net, storage_nodes, bus_index_by_node_id
+        )
+        storage_idx = storage_count_before
+        for node in storage_nodes:
+            node_id = node.get("id", "")
+            if any(status.element_id == node_id for status in storage_failed):
+                continue
+            if storage_idx < len(net.storage):
+                storage_index_by_node_id[node_id] = int(net.storage.index[storage_idx])
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="storage", success=True, error=None
+                )
+                storage_idx += 1
+        for status in storage_failed:
+            element_status[status.element_id] = status
+
+        # (e) Switches (phụ thuộc line/trafo đã có index)
+        switch_success, switch_failed = network_creation._add_switches(
+            net, switch_nodes, bus_index_by_node_id, line_index_by_edge_id, trafo_index_by_node_id
+        )
+        # Track thành công cho switches
+        for node in switch_nodes:
+            node_id = node.get("id", "")
+            if not any(status.element_id == node_id for status in switch_failed):
+                element_status[node_id] = CreationStatus(
+                    element_id=node_id, element_type="switch", success=True, error=None
+                )
+        for status in switch_failed:
+            element_status[status.element_id] = status
+
+        # 6. Chạy power flow với settings
+        try:
+            pp.runpp(
+                net,
+                algorithm=request.settings.algorithm,
+                max_iteration=request.settings.max_iter,
+                tolerance_mva=request.settings.tolerance_mva,
+            )
+            converged = True
+        except Exception as e:  # noqa: BLE001
+            converged = False
+            warnings.append(f"Power flow không hội tụ: {str(e)}")
+
+        # 7. Gom kết quả
+        runtime_ms = int((time.time() - start_time) * 1000)
+
+        # Bus results
+        bus_by_id: Dict[str, BusResult] = {}
+        res_bus: List[Dict[str, Any]] = []
+
+        if converged and hasattr(net, "res_bus") and len(net.res_bus) > 0:
+            for node_id, bus_idx in bus_index_by_node_id.items():
+                if bus_idx in net.res_bus.index:
+                    row = net.res_bus.loc[bus_idx]
+                    bus_by_id[node_id] = BusResult(
+                        vm_pu=_to_optional_float(row.get("vm_pu", 1.0)),
+                        va_degree=_to_optional_float(row.get("va_degree", 0.0)),
+                        p_mw=_to_optional_float(row.get("p_mw", 0.0)),
+                        q_mvar=_to_optional_float(row.get("q_mvar", 0.0)),
+                    )
+
+            # res_bus as list of dicts
+            res_bus = _sanitize_json_floats(net.res_bus.reset_index().to_dict("records"))
+
+        # Results cho các phần tử khác
+        results = result_collection._collect_simulation_results(
+            net=net,
+            converged=converged,
+            load_node_ids=load_node_ids,
+            gen_node_ids=gen_node_ids,
+            sgen_node_ids=sgen_node_ids,
+            motor_node_ids=motor_node_ids,
+            shunt_node_ids=shunt_node_ids,
+            storage_node_ids=storage_node_ids,
+            line_edge_ids=line_edge_ids,
+            trafo_node_ids=transformer_node_ids,
+            trafo3w_node_ids=trafo3w_node_ids,
+            load_index_by_node_id=load_index_by_node_id,
+            gen_index_by_node_id=gen_index_by_node_id,
+            sgen_index_by_node_id=sgen_index_by_node_id,
+            motor_index_by_node_id=motor_index_by_node_id,
+            shunt_index_by_node_id=shunt_index_by_node_id,
+            storage_index_by_node_id=storage_index_by_node_id,
+            line_index_by_edge_id=line_index_by_edge_id,
+            trafo_index_by_node_id=trafo_index_by_node_id,
+            trafo3w_index_by_node_id=trafo3w_index_by_node_id,
+        )
+        results = _sanitize_json_floats(results)
+
+        # Build response
+        return SimulateResponse(
+            summary=Summary(
+                converged=converged,
+                runtime_ms=runtime_ms,
+                slack_bus_id=slack_bus_id,
+            ),
+            bus_by_id=bus_by_id,
+            res_bus=res_bus,
+            warnings=warnings,
+            errors=errors,
+            element_status=element_status,
+            results=results,
+        )
+
+    except Exception as e:  # noqa: BLE001
+        # Xử lý lỗi tổng quát
+        runtime_ms = int((time.time() - start_time) * 1000)
+        errors.setdefault("network", []).append(
+            ValidationError(
+                element_id="",
+                element_type="network",
+                field="",
+                message=f"Lỗi khi tạo network: {str(e)}",
+            )
+        )
+        return _build_error_response(start_time, errors, element_status, warnings, slack_bus_id)
+
+
+def _build_error_response(
+    start_time: float,
+    errors: Dict[str, List[ValidationError]],
+    element_status: Dict[str, CreationStatus],
+    warnings: List[str],
+    slack_bus_id: str,
+) -> SimulateResponse:
+    """Helper function để build error response."""
+    runtime_ms = int((time.time() - start_time) * 1000)
     return SimulateResponse(
-        summary={
-            "converged": converged,
-            "runtime_ms": runtime_ms,
-            "slack_bus_id": slack_bus_id,
-        },
-        bus_by_id=bus_by_id,
-        res_bus=res_bus_records,
+        summary=Summary(converged=False, runtime_ms=runtime_ms, slack_bus_id=slack_bus_id),
+        bus_by_id={},
+        res_bus=[],
         warnings=warnings,
-        errors={
-            "validation": [],
-            "creation": [f.model_dump() for f in all_creation_failed],
-            "simulation": simulation_errors,
-        },
-        element_status={k: v.model_dump() for k, v in element_status.items()},
-        results=results,
+        errors=errors,
+        element_status=element_status,
+        results={},
     )
 
