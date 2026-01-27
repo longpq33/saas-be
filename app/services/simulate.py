@@ -5,6 +5,7 @@ import time
 from typing import Any, Dict, List
 
 import pandapower as pp
+from pandapower.powerflow import LoadflowNotConverged
 
 from app.helper import network_creation, result_collection, validation
 from app.models.schemas import (
@@ -130,6 +131,23 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
         if validation_errors:
             errors["validation"] = validation_errors
 
+            # Fail-fast: nếu có lỗi validation thì dừng sớm, không tạo phần tử / không chạy power flow
+            for err in validation_errors:
+                if err.element_id:
+                    element_status.setdefault(
+                        err.element_id,
+                        CreationStatus(
+                            element_id=err.element_id,
+                            element_type=err.element_type,
+                            success=False,
+                            error=err.message,
+                        ),
+                    )
+
+            return _build_error_response(
+                start_time, errors, element_status, warnings, slack_bus_id
+            )
+
         # 5. Tạo các phần tử theo thứ tự phụ thuộc
 
         # (a) Lines từ edges
@@ -192,12 +210,19 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
         for status in ext_grid_failed:
             element_status[status.element_id] = status
 
-        # Xác định slack_bus_id từ ext_grid đầu tiên
-        if ext_grid_nodes:
-            first_ext_grid = ext_grid_nodes[0]
-            first_ext_grid_bus_id = str(first_ext_grid.get("data", {}).get("busId", ""))
-            if first_ext_grid_bus_id and first_ext_grid_bus_id in bus_index_by_node_id:
-                slack_bus_id = first_ext_grid_bus_id
+        # Xác định slack_bus_id từ ext_grid thực tế trong pandapower network
+        if hasattr(net, "ext_grid") and len(net.ext_grid) > 0:
+            if len(net.ext_grid) > 1:
+                warnings.append("Multiple ext_grids detected; using the first for slack reporting")
+
+            try:
+                slack_bus_idx = int(net.ext_grid.iloc[0].bus)
+                # reverse map bus index -> node id
+                node_id_by_bus_idx = {idx: node_id for node_id, idx in bus_index_by_node_id.items()}
+                slack_bus_id = node_id_by_bus_idx.get(slack_bus_idx, slack_bus_id)
+            except Exception:  # noqa: BLE001
+                # fallback giữ nguyên slack_bus_id hiện tại
+                pass
 
         try:
             network_creation._ensure_slack(net)
@@ -341,9 +366,55 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
                 tolerance_mva=request.settings.tolerance_mva,
             )
             converged = True
+        except LoadflowNotConverged as e:
+            converged = False
+
+            # Trả lỗi chi tiết hơn dựa trên thông tin solver
+            errors.setdefault("powerflow", []).append(
+                ValidationError(
+                    element_id="",
+                    element_type="network",
+                    field="runpp",
+                    message=(
+                        "Power flow did not converge. "
+                        f"algorithm={request.settings.algorithm}, "
+                        f"max_iter={request.settings.max_iter}, "
+                        f"tolerance_mva={request.settings.tolerance_mva}. "
+                        f"detail={str(e)}"
+                    ),
+                )
+            )
+
+            # Hints từ trạng thái network (nếu có)
+            try:
+                if hasattr(net, "converged") and not bool(getattr(net, "converged")):
+                    errors.setdefault("powerflow", []).append(
+                        ValidationError(
+                            element_id="",
+                            element_type="network",
+                            field="converged",
+                            message="pandapower net.converged is False",
+                        )
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
         except Exception as e:  # noqa: BLE001
             converged = False
-            warnings.append(f"Power flow không hội tụ: {str(e)}")
+            errors.setdefault("powerflow", []).append(
+                ValidationError(
+                    element_id="",
+                    element_type="network",
+                    field="runpp",
+                    message=(
+                        "Power flow failed unexpectedly. "
+                        f"algorithm={request.settings.algorithm}, "
+                        f"max_iter={request.settings.max_iter}, "
+                        f"tolerance_mva={request.settings.tolerance_mva}. "
+                        f"detail={str(e)}"
+                    ),
+                )
+            )
 
         # 7. Gom kết quả
         runtime_ms = int((time.time() - start_time) * 1000)
@@ -365,6 +436,110 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
             # res_bus as list of dicts
             res_bus = _sanitize_json_floats(net.res_bus.reset_index().to_dict("records"))
+
+        # --- Violations reporting (mark success=false so UI counts failed elements) ---
+        if converged:
+            # Voltage limits per bus (default 0.95..1.05, can be overridden by bus node data)
+            bus_data_by_id: Dict[str, Dict[str, Any]] = {
+                n.get("id", ""): (n.get("data") or {})
+                for n in bus_nodes
+                if n.get("id")
+            }
+
+            default_min_vm = 0.95
+            default_max_vm = 1.05
+
+            for bus_node_id, br in bus_by_id.items():
+                if br.vm_pu is None:
+                    continue
+                data = bus_data_by_id.get(bus_node_id, {})
+                min_vm = _to_optional_float(data.get("min_vm_pu", default_min_vm)) or default_min_vm
+                max_vm = _to_optional_float(data.get("max_vm_pu", default_max_vm)) or default_max_vm
+
+                if br.vm_pu < min_vm or br.vm_pu > max_vm:
+                    msg = f"Voltage violation at bus '{bus_node_id}': vm_pu={br.vm_pu} not in [{min_vm}, {max_vm}]"
+                    warnings.append(msg)
+                    element_status[bus_node_id] = CreationStatus(
+                        element_id=bus_node_id,
+                        element_type="bus",
+                        success=False,
+                        error=msg,
+                    )
+
+            # Line overload
+            if hasattr(net, "res_line") and len(net.res_line) > 0:
+                for edge_id, line_idx in line_index_by_edge_id.items():
+                    if line_idx not in net.res_line.index:
+                        continue
+                    loading = _to_optional_float(net.res_line.loc[line_idx].get("loading_percent", None))
+                    if loading is None:
+                        continue
+                    if loading > 100.0:
+                        msg = f"Line overload '{edge_id}': loading_percent={loading} > 100"
+                        warnings.append(msg)
+                        element_status[edge_id] = CreationStatus(
+                            element_id=edge_id,
+                            element_type="line",
+                            success=False,
+                            error=msg,
+                        )
+
+            # Trafo overload
+            if hasattr(net, "res_trafo") and len(net.res_trafo) > 0:
+                for node_id, trafo_idx in trafo_index_by_node_id.items():
+                    if trafo_idx not in net.res_trafo.index:
+                        continue
+                    loading = _to_optional_float(net.res_trafo.loc[trafo_idx].get("loading_percent", None))
+                    if loading is None:
+                        continue
+                    if loading > 100.0:
+                        msg = f"Transformer overload '{node_id}': loading_percent={loading} > 100"
+                        warnings.append(msg)
+                        element_status[node_id] = CreationStatus(
+                            element_id=node_id,
+                            element_type="transformer",
+                            success=False,
+                            error=msg,
+                        )
+
+            # Gen Q limits (only when min/max provided)
+            gen_data_by_id: Dict[str, Dict[str, Any]] = {
+                n.get("id", ""): (n.get("data") or {})
+                for n in gen_nodes
+                if n.get("id")
+            }
+            if hasattr(net, "res_gen") and len(net.res_gen) > 0:
+                for node_id, gen_idx in gen_index_by_node_id.items():
+                    if gen_idx not in net.res_gen.index:
+                        continue
+                    data = gen_data_by_id.get(node_id, {})
+                    qmin = _to_optional_float(data.get("min_q_mvar", None))
+                    qmax = _to_optional_float(data.get("max_q_mvar", None))
+                    if qmin is None and qmax is None:
+                        continue
+
+                    q = _to_optional_float(net.res_gen.loc[gen_idx].get("q_mvar", None))
+                    if q is None:
+                        continue
+
+                    if qmin is not None and q < qmin:
+                        msg = f"Generator Q below min at '{node_id}': q_mvar={q} < min_q_mvar={qmin}"
+                        warnings.append(msg)
+                        element_status[node_id] = CreationStatus(
+                            element_id=node_id,
+                            element_type="gen",
+                            success=False,
+                            error=msg,
+                        )
+                    elif qmax is not None and q > qmax:
+                        msg = f"Generator Q above max at '{node_id}': q_mvar={q} > max_q_mvar={qmax}"
+                        warnings.append(msg)
+                        element_status[node_id] = CreationStatus(
+                            element_id=node_id,
+                            element_type="gen",
+                            success=False,
+                            error=msg,
+                        )
 
         # Results cho các phần tử khác
         results = result_collection._collect_simulation_results(
