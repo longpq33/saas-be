@@ -8,6 +8,7 @@ import pandapower as pp
 from pandapower.powerflow import LoadflowNotConverged
 
 from app.helper import network_creation, result_collection, validation
+from app.helper.net_export import export_network
 from app.models.schemas import (
     BusResult,
     CreationStatus,
@@ -199,7 +200,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
         # (c) Slack/External grid
         ext_grid_success, ext_grid_failed = network_creation._add_ext_grids(
-            net, ext_grid_nodes, bus_index_by_node_id
+            net, ext_grid_nodes, bus_index_by_node_id, edges_dict
         )
         # Track thành công cho ext_grid
         for node in ext_grid_nodes:
@@ -567,6 +568,8 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
         )
         results = _sanitize_json_floats(results)
 
+        network_payload = export_network(net, mode=request.settings.return_network)
+
         # Build response
         return SimulateResponse(
             summary=Summary(
@@ -580,6 +583,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
             errors=errors,
             element_status=element_status,
             results=results,
+            network=network_payload,
         )
 
     except Exception as e:  # noqa: BLE001

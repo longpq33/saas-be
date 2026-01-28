@@ -429,44 +429,99 @@ def _validate_network(
                 )
             )
 
-    # Validate edges (lines)
+    # Validate edges based on their 'kind'
+    all_node_ids_by_type: Dict[str, Set[str]] = {}
+    for n in nodes:
+        node_type = n.get("type", "")
+        if node_type:
+            all_node_ids_by_type.setdefault(node_type, set()).add(n["id"])
+
     for edge in edges:
         edge_id = edge.get("id", "")
         edge_data = edge.get("data") or {}
-        std_type = str(edge_data.get("std_type", ""))
-        length_km = _as_float(edge_data.get("length_km", None))
+        kind = str(edge_data.get("kind", ""))
+        src = str(edge.get("source", ""))
+        tgt = str(edge.get("target", ""))
 
-        if not std_type:
-            errors.append(
-                ValidationError(
-                    element_id=edge_id,
-                    element_type="line",
-                    element_name=edge_data.get("name"),
-                    field="std_type",
-                    message="std_type is required",
+        if kind == "line":
+            # Physical lines must be bus-to-bus
+            if src not in bus_index_by_node_id or tgt not in bus_index_by_node_id:
+                errors.append(
+                    ValidationError(
+                        element_id=edge_id,
+                        element_type="line",
+                        element_name=edge_data.get("name"),
+                        field="endpoints",
+                        message="Line must connect between two buses.",
+                    )
                 )
-            )
+                continue  # Skip further checks for this invalid line
 
-        if length_km is None:
-            errors.append(
-                ValidationError(
-                    element_id=edge_id,
-                    element_type="line",
-                    element_name=edge_data.get("name"),
-                    field="length_km",
-                    message="length_km must be a number",
+            # Check line parameters
+            std_type = str(edge_data.get("std_type", ""))
+            length_km = _as_float(edge_data.get("length_km", None))
+
+            if not std_type:
+                errors.append(
+                    ValidationError(
+                        element_id=edge_id,
+                        element_type="line",
+                        element_name=edge_data.get("name"),
+                        field="std_type",
+                        message="std_type is required for lines.",
+                    )
                 )
-            )
-        elif length_km <= 0:
-            errors.append(
-                ValidationError(
-                    element_id=edge_id,
-                    element_type="line",
-                    element_name=edge_data.get("name"),
-                    field="length_km",
-                    message="length_km must be > 0",
+
+            if length_km is None:
+                errors.append(
+                    ValidationError(
+                        element_id=edge_id,
+                        element_type="line",
+                        element_name=edge_data.get("name"),
+                        field="length_km",
+                        message="length_km must be a number.",
+                    )
                 )
-            )
+            elif length_km <= 0:
+                errors.append(
+                    ValidationError(
+                        element_id=edge_id,
+                        element_type="line",
+                        element_name=edge_data.get("name"),
+                        field="length_km",
+                        message="length_km must be > 0.",
+                    )
+                )
+        elif kind == "attach":
+            # Attachment edges are for UI and binding, check for valid connections
+            attach_type = str(edge_data.get("attach_type", ""))
+            if not attach_type:
+                continue  # Ignore attach edges without a type
+
+            src_type = next((n.get("type") for n in nodes if n["id"] == src), None)
+            tgt_type = next((n.get("type") for n in nodes if n["id"] == tgt), None)
+
+            is_valid_attach = False
+            if attach_type == "ext_grid":
+                # Enforce one-way ext_grid -> bus
+                if src_type == "ext_grid" and tgt_type == "bus":
+                    is_valid_attach = True
+            else:
+                # General equipment: one end must be a bus, the other the equipment
+                if (src_type == "bus" and tgt_type == attach_type) or \
+                   (tgt_type == "bus" and src_type == attach_type):
+                    is_valid_attach = True
+
+            if not is_valid_attach:
+                errors.append(
+                    ValidationError(
+                        element_id=edge_id,
+                        element_type="attachment",
+                        element_name=edge_data.get("name"),
+                        field="endpoints",
+                        message=f"Invalid attachment for type '{attach_type}'. Must connect between a bus and a '{attach_type}' node.",
+                    )
+                )
 
     # Check for at least one ext_grid
     if not ext_grid_nodes:

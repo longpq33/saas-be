@@ -80,16 +80,37 @@ def _add_loads(
 
 
 def _add_ext_grids(
-    net: pp.pandapowerNet, nodes: List[Dict[str, Any]], bus_index_by_node_id: Dict[str, int]
+    net: pp.pandapowerNet,
+    nodes: List[Dict[str, Any]],
+    bus_index_by_node_id: Dict[str, int],
+    edges: List[Dict[str, Any]] | None = None,
 ) -> Tuple[int, List[CreationStatus]]:
     """Add ext_grids to network. Returns (success_count, failed_elements)."""
     failed: List[CreationStatus] = []
     success_count = 0
 
+    attach_bus_by_ext_grid_id: Dict[str, str] = {}
+    if edges:
+        for e in edges:
+            data = e.get("data") or {}
+            if str(data.get("kind")) != "attach":
+                continue
+            if str(data.get("attach_type")) != "ext_grid":
+                continue
+            src = str(e.get("source") or "")
+            tgt = str(e.get("target") or "")
+            if not src or not tgt:
+                continue
+            # src=ext_grid, tgt=bus
+            attach_bus_by_ext_grid_id[src] = tgt
+
     for n in nodes:
         node_id = n.get("id", "")
         data = n.get("data") or {}
+
         bus_id = str(data.get("busId", ""))
+        if not bus_id:
+            bus_id = str(attach_bus_by_ext_grid_id.get(node_id, ""))
 
         if not bus_id or bus_id not in bus_index_by_node_id:
             failed.append(
@@ -659,6 +680,10 @@ def _add_lines_from_edges(
             return default
         return f
 
+    def _is_line_edge(edge_data: Dict[str, Any], src: str, tgt: str) -> bool:
+        # Strict contract: only explicit kind='line' is treated as a pandapower line
+        return str(edge_data.get("kind")) == "line"
+
     for e in edges:
         edge_id = e.get("id", "")
         src = e.get("source")
@@ -673,6 +698,12 @@ def _add_lines_from_edges(
                     error="source or target missing",
                 )
             )
+            continue
+
+        edge_data = e.get("data") or {}
+
+        # Skip non-line edges (e.g. attachment edges)
+        if not _is_line_edge(edge_data, src, tgt):
             continue
 
         if src not in bus_index_by_node_id or tgt not in bus_index_by_node_id:
@@ -696,8 +727,6 @@ def _add_lines_from_edges(
                 )
             )
             continue
-
-        edge_data = e.get("data") or {}
 
         # Common line fields
         name = str(edge_data.get("name", "")) or None

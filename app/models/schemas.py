@@ -55,6 +55,7 @@ class RunSettings(BaseModel):
     algorithm: str = "nr"
     max_iter: int = 20
     tolerance_mva: float = 1e-6
+    return_network: Literal["none", "summary", "tables"] = "none"
 
 
 class SimulateRequest(BaseModel):
@@ -163,4 +164,5 @@ class SimulateResponse(BaseModel):
     errors: Dict[str, List[ValidationError]] = Field(default_factory=dict)
     element_status: Dict[str, CreationStatus] = Field(default_factory=dict)
     results: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    network: Optional[Dict[str, Any]] = None
 
