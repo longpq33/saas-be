@@ -47,13 +47,16 @@ def _validate_network(
         bus_ids = [n.get("id", "") for n in nodes if n.get("type") == "bus" and n.get("id")]
         adj: Dict[str, Set[str]] = {bid: set() for bid in bus_ids}
 
-        # Lines from edges
-        for e in edges:
-            edge_id = e.get("id", "") or ""
-            if edge_id in open_line_ids:
+        # Lines from nodes (new model)
+        for n in nodes:
+            if n.get("type") != "line":
                 continue
-            src = e.get("source")
-            tgt = e.get("target")
+            node_id = _as_str(n.get("id", ""))
+            if node_id in open_line_ids:
+                continue
+            data = n.get("data") or {}
+            src = _as_str(data.get("fromBusId", ""))
+            tgt = _as_str(data.get("toBusId", ""))
             if not src or not tgt:
                 continue
             if src not in adj or tgt not in adj:
@@ -90,6 +93,30 @@ def _validate_network(
                 if a in adj and b in adj and a != b:
                     adj[a].add(b)
                     adj[b].add(a)
+
+        # Switch bus-bus coupler connectivity (new behavior)
+        # If a switch is closed and elementType='bus', treat it as a connectivity edge between busId and elementId.
+        for n in nodes:
+            if n.get("type") != "switch":
+                continue
+            data = n.get("data") or {}
+            if not bool(data.get("in_service", True)):
+                continue
+            if not bool(data.get("closed", True)):
+                continue
+            if _as_str(data.get("elementType", "line")) != "bus":
+                continue
+
+            a = _as_str(data.get("busId", ""))
+            b = _as_str(data.get("elementId", ""))
+            if not a or not b:
+                continue
+            if a not in adj or b not in adj:
+                continue
+            if a == b:
+                continue
+            adj[a].add(b)
+            adj[b].add(a)
 
         # Ext grid buses
         ext_grid_bus_ids: Set[str] = set()
@@ -158,6 +185,7 @@ def _validate_network(
     shunt_nodes = [n for n in nodes if n.get("type") == "shunt"]
     storage_nodes = [n for n in nodes if n.get("type") == "storage"]
     transformer_nodes = [n for n in nodes if n.get("type") == "transformer"]
+    line_nodes = [n for n in nodes if n.get("type") == "line"]
     trafo3w_nodes = [n for n in nodes if n.get("type") == "trafo3w"]
     switch_nodes = [n for n in nodes if n.get("type") == "switch"]
 
@@ -376,6 +404,114 @@ def _validate_network(
                 )
             )
 
+    # Validate lines (new model)
+    for node in line_nodes:
+        node_id = node.get("id", "")
+        data = node.get("data") or {}
+        node_name = data.get("name")
+
+        from_bus_id = _as_str(data.get("fromBusId", ""))
+        to_bus_id = _as_str(data.get("toBusId", ""))
+
+        if not from_bus_id:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="fromBusId",
+                    message="fromBusId is required",
+                )
+            )
+        elif from_bus_id not in bus_index_by_node_id:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="fromBusId",
+                    message=f"fromBusId '{from_bus_id}' does not exist",
+                )
+            )
+
+        if not to_bus_id:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="toBusId",
+                    message="toBusId is required",
+                )
+            )
+        elif to_bus_id not in bus_index_by_node_id:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="toBusId",
+                    message=f"toBusId '{to_bus_id}' does not exist",
+                )
+            )
+
+        if from_bus_id and to_bus_id and from_bus_id == to_bus_id:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="endpoints",
+                    message="fromBusId and toBusId cannot be the same",
+                )
+            )
+
+        length_km = _as_float(data.get("length_km", None))
+        if length_km is None:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="length_km",
+                    message="length_km must be a number",
+                )
+            )
+        elif length_km <= 0:
+            errors.append(
+                ValidationError(
+                    element_id=node_id,
+                    element_type="line",
+                    element_name=node_name,
+                    field="length_km",
+                    message="length_km must be > 0",
+                )
+            )
+
+        std_type = _as_str(data.get("std_type", "")).strip()
+        if not std_type:
+            # allow custom params path, but then require params
+            missing_fields = [
+                f
+                for f, v in (
+                    ("r_ohm_per_km", data.get("r_ohm_per_km")),
+                    ("x_ohm_per_km", data.get("x_ohm_per_km")),
+                    ("c_nf_per_km", data.get("c_nf_per_km")),
+                    ("max_i_ka", data.get("max_i_ka")),
+                )
+                if v is None
+            ]
+            if missing_fields:
+                errors.append(
+                    ValidationError(
+                        element_id=node_id,
+                        element_type="line",
+                        element_name=node_name,
+                        field="parameters",
+                        message=f"Missing line parameters: {', '.join(missing_fields)}",
+                    )
+                )
+
     # Validate switches
     # Note: We can't fully validate switches here because we need line/trafo indices
     # which are created later. We'll validate what we can.
@@ -444,54 +580,8 @@ def _validate_network(
         tgt = str(edge.get("target", ""))
 
         if kind == "line":
-            # Physical lines must be bus-to-bus
-            if src not in bus_index_by_node_id or tgt not in bus_index_by_node_id:
-                errors.append(
-                    ValidationError(
-                        element_id=edge_id,
-                        element_type="line",
-                        element_name=edge_data.get("name"),
-                        field="endpoints",
-                        message="Line must connect between two buses.",
-                    )
-                )
-                continue  # Skip further checks for this invalid line
-
-            # Check line parameters
-            std_type = str(edge_data.get("std_type", ""))
-            length_km = _as_float(edge_data.get("length_km", None))
-
-            if not std_type:
-                errors.append(
-                    ValidationError(
-                        element_id=edge_id,
-                        element_type="line",
-                        element_name=edge_data.get("name"),
-                        field="std_type",
-                        message="std_type is required for lines.",
-                    )
-                )
-
-            if length_km is None:
-                errors.append(
-                    ValidationError(
-                        element_id=edge_id,
-                        element_type="line",
-                        element_name=edge_data.get("name"),
-                        field="length_km",
-                        message="length_km must be a number.",
-                    )
-                )
-            elif length_km <= 0:
-                errors.append(
-                    ValidationError(
-                        element_id=edge_id,
-                        element_type="line",
-                        element_name=edge_data.get("name"),
-                        field="length_km",
-                        message="length_km must be > 0.",
-                    )
-                )
+            # Legacy line edges are ignored in the new model (Line is a node)
+            continue
         elif kind == "attach":
             # Attachment edges are for UI and binding, check for valid connections
             attach_type = str(edge_data.get("attach_type", ""))

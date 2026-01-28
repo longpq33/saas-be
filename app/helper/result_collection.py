@@ -25,7 +25,7 @@ def _collect_simulation_results(
     motor_node_ids: List[str],
     shunt_node_ids: List[str],
     storage_node_ids: List[str],
-    line_edge_ids: List[str],
+    line_edge_ids: List[str],  # line-node ids in the new model
     trafo_node_ids: List[str],
     trafo3w_node_ids: List[str],
     load_index_by_node_id: Dict[str, int],
@@ -34,7 +34,7 @@ def _collect_simulation_results(
     motor_index_by_node_id: Dict[str, int],
     shunt_index_by_node_id: Dict[str, int],
     storage_index_by_node_id: Dict[str, int],
-    line_index_by_edge_id: Dict[str, int],
+    line_index_by_edge_id: Dict[str, int],  # line-node id -> pandapower line index in the new model
     trafo_index_by_node_id: Dict[str, int],
     trafo3w_index_by_node_id: Dict[str, int],
 ) -> Dict[str, Dict[str, Any]]:

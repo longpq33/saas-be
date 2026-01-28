@@ -30,6 +30,7 @@ class ReactFlowNode(BaseModel):
     id: str
     type: Literal[
         "bus",
+        "line",
         "load",
         "transformer",
         "ext_grid",

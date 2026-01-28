@@ -544,7 +544,7 @@ def _add_switches(
     net: pp.pandapowerNet,
     nodes: List[Dict[str, Any]],
     bus_index_by_node_id: Dict[str, int],
-    line_index_by_edge_id: Dict[str, int],
+    line_index_by_node_id: Dict[str, int],
     trafo_index_by_node_id: Dict[str, int],
 ) -> Tuple[int, List[CreationStatus]]:
     """Add switches to network. Returns (success_count, failed_elements)."""
@@ -574,7 +574,7 @@ def _add_switches(
         et: str | None = None
 
         if element_type == "line":
-            if element_id not in line_index_by_edge_id:
+            if element_id not in line_index_by_node_id:
                 failed.append(
                     CreationStatus(
                         element_id=node_id,
@@ -584,7 +584,7 @@ def _add_switches(
                     )
                 )
                 continue
-            element_idx = line_index_by_edge_id[element_id]
+            element_idx = line_index_by_node_id[element_id]
             et = "l"
         elif element_type == "trafo":
             if element_id not in trafo_index_by_node_id:
@@ -657,12 +657,176 @@ def _ensure_slack(net: pp.pandapowerNet) -> None:
         raise ValueError("No ext_grid found. At least one ext_grid is required.")
 
 
+def _add_lines_from_nodes(
+    net: pp.pandapowerNet,
+    nodes: List[Dict[str, Any]],
+    bus_index_by_node_id: Dict[str, int],
+) -> Tuple[List[Tuple[int, str, Dict[str, Any]]], Dict[str, int], List[CreationStatus]]:
+    """Create lines from Line nodes. Returns (line_nodes_created, line_index_by_node_id, failed_elements)."""
+    line_nodes_created: List[Tuple[int, str, Dict[str, Any]]] = []
+    line_index_by_node_id: Dict[str, int] = {}
+    failed: List[CreationStatus] = []
+
+    def _to_int(v: Any, default: int) -> int:
+        try:
+            i = int(v)
+        except (TypeError, ValueError):
+            return default
+        return i
+
+    def _to_float(v: Any, default: float) -> float:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        return f
+
+    for n in nodes:
+        node_id = n.get("id", "")
+        data = n.get("data") or {}
+
+        from_bus_id = str(data.get("fromBusId", ""))
+        to_bus_id = str(data.get("toBusId", ""))
+
+        if not from_bus_id or from_bus_id not in bus_index_by_node_id:
+            failed.append(
+                CreationStatus(
+                    element_id=node_id,
+                    element_type="line",
+                    success=False,
+                    error=f"fromBusId '{from_bus_id}' not found or invalid",
+                )
+            )
+            continue
+
+        if not to_bus_id or to_bus_id not in bus_index_by_node_id:
+            failed.append(
+                CreationStatus(
+                    element_id=node_id,
+                    element_type="line",
+                    success=False,
+                    error=f"toBusId '{to_bus_id}' not found or invalid",
+                )
+            )
+            continue
+
+        if from_bus_id == to_bus_id:
+            failed.append(
+                CreationStatus(
+                    element_id=node_id,
+                    element_type="line",
+                    success=False,
+                    error="fromBusId and toBusId cannot be the same",
+                )
+            )
+            continue
+
+        # Common line fields
+        name = str(data.get("name", "")) or None
+        length_km = _to_float(data.get("length_km"), 1.0)
+        parallel = _to_int(data.get("parallel"), 1)
+        df = _to_float(data.get("df"), 1.0)
+
+        if length_km <= 0:
+            failed.append(
+                CreationStatus(
+                    element_id=node_id,
+                    element_type="line",
+                    success=False,
+                    error="length_km must be > 0",
+                )
+            )
+            continue
+
+        # Switch handling: if enabled and open => out-of-service
+        in_service = bool(data.get("in_service", True))
+        sw = (data.get("switch") or {}) if isinstance(data.get("switch"), dict) else {}
+        if bool(sw.get("enabled", False)) and not bool(sw.get("closed", True)):
+            in_service = False
+
+        from_bus = bus_index_by_node_id[from_bus_id]
+        to_bus = bus_index_by_node_id[to_bus_id]
+
+        std_type_raw = data.get("std_type")
+        std_type = str(std_type_raw).strip() if std_type_raw is not None else ""
+
+        try:
+            if std_type:
+                line_idx = pp.create_line(
+                    net,
+                    from_bus=from_bus,
+                    to_bus=to_bus,
+                    length_km=length_km,
+                    std_type=std_type,
+                    name=name,
+                    parallel=parallel,
+                    df=df,
+                    in_service=in_service,
+                )
+            else:
+                # Custom parameters path
+                r_ohm_per_km = data.get("r_ohm_per_km")
+                x_ohm_per_km = data.get("x_ohm_per_km")
+                c_nf_per_km = data.get("c_nf_per_km")
+                max_i_ka = data.get("max_i_ka")
+
+                missing_fields = [
+                    f
+                    for f, v in (
+                        ("r_ohm_per_km", r_ohm_per_km),
+                        ("x_ohm_per_km", x_ohm_per_km),
+                        ("c_nf_per_km", c_nf_per_km),
+                        ("max_i_ka", max_i_ka),
+                    )
+                    if v is None
+                ]
+                if missing_fields:
+                    failed.append(
+                        CreationStatus(
+                            element_id=node_id,
+                            element_type="line",
+                            success=False,
+                            error=f"Missing line parameters: {', '.join(missing_fields)}",
+                        )
+                    )
+                    continue
+
+                line_idx = pp.create_line_from_parameters(
+                    net,
+                    from_bus=from_bus,
+                    to_bus=to_bus,
+                    length_km=length_km,
+                    r_ohm_per_km=_to_float(r_ohm_per_km, 0.0),
+                    x_ohm_per_km=_to_float(x_ohm_per_km, 0.0),
+                    c_nf_per_km=_to_float(c_nf_per_km, 0.0),
+                    max_i_ka=_to_float(max_i_ka, 0.0),
+                    name=name,
+                    parallel=parallel,
+                    df=df,
+                    in_service=in_service,
+                )
+
+            line_nodes_created.append((int(line_idx), node_id, data))
+            line_index_by_node_id[node_id] = int(line_idx)
+        except Exception as e:  # noqa: BLE001
+            failed.append(
+                CreationStatus(
+                    element_id=node_id,
+                    element_type="line",
+                    success=False,
+                    error=str(e),
+                )
+            )
+
+    return line_nodes_created, line_index_by_node_id, failed
+
+
 def _add_lines_from_edges(
     net: pp.pandapowerNet,
     edges: List[Dict[str, Any]],
     bus_index_by_node_id: Dict[str, int],
 ) -> Tuple[List[Tuple[int, str, Dict[str, Any]]], List[CreationStatus]]:
-    """Create lines from edges. Returns (line_edges, failed_elements)."""
+    """DEPRECATED: Create lines from edges (kind='line'). The new model uses Line nodes."""
     line_edges: List[Tuple[int, str, Dict[str, Any]]] = []
     failed: List[CreationStatus] = []
 
@@ -820,4 +984,3 @@ def _add_lines_from_edges(
             )
 
     return line_edges, failed
-

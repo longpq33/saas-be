@@ -73,6 +73,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
     motor_nodes = [n for n in nodes_dict if n.get("type") == "motor"]
     shunt_nodes = [n for n in nodes_dict if n.get("type") == "shunt"]
     storage_nodes = [n for n in nodes_dict if n.get("type") == "storage"]
+    line_nodes = [n for n in nodes_dict if n.get("type") == "line"]
     transformer_nodes = [n for n in nodes_dict if n.get("type") == "transformer"]
     trafo3w_nodes = [n for n in nodes_dict if n.get("type") == "trafo3w"]
     switch_nodes = [n for n in nodes_dict if n.get("type") == "switch"]
@@ -86,7 +87,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
     # Mapping indices cho các phần tử
     bus_index_by_node_id: Dict[str, int] = {}
-    line_index_by_edge_id: Dict[str, int] = {}
+    line_index_by_node_id: Dict[str, int] = {}
     trafo_index_by_node_id: Dict[str, int] = {}
     trafo3w_index_by_node_id: Dict[str, int] = {}
     load_index_by_node_id: Dict[str, int] = {}
@@ -105,7 +106,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
     storage_node_ids: List[str] = [n["id"] for n in storage_nodes]
     transformer_node_ids: List[str] = [n["id"] for n in transformer_nodes]
     trafo3w_node_ids: List[str] = [n["id"] for n in trafo3w_nodes]
-    line_edge_ids: List[str] = [e["id"] for e in edges_dict]
+    line_node_ids: List[str] = [n["id"] for n in line_nodes]
 
     try:
         # 2. Tạo network rỗng
@@ -152,15 +153,13 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
         # 5. Tạo các phần tử theo thứ tự phụ thuộc
 
-        # (a) Lines từ edges
-        line_edges, line_failed = network_creation._add_lines_from_edges(
-            net, edges_dict, bus_index_by_node_id
+        # (a) Lines từ Line nodes (NEW model)
+        line_created, line_index_by_node_id, line_failed = network_creation._add_lines_from_nodes(
+            net, line_nodes, bus_index_by_node_id
         )
-        for line_idx, edge_id, _ in line_edges:
-            line_index_by_edge_id[edge_id] = line_idx
-            # Track thành công
-            element_status[edge_id] = CreationStatus(
-                element_id=edge_id, element_type="line", success=True, error=None
+        for line_idx, node_id, _ in line_created:
+            element_status[node_id] = CreationStatus(
+                element_id=node_id, element_type="line", success=True, error=None
             )
         for status in line_failed:
             element_status[status.element_id] = status
@@ -347,7 +346,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
         # (e) Switches (phụ thuộc line/trafo đã có index)
         switch_success, switch_failed = network_creation._add_switches(
-            net, switch_nodes, bus_index_by_node_id, line_index_by_edge_id, trafo_index_by_node_id
+            net, switch_nodes, bus_index_by_node_id, line_index_by_node_id, trafo_index_by_node_id
         )
         # Track thành công cho switches
         for node in switch_nodes:
@@ -470,17 +469,17 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
 
             # Line overload
             if hasattr(net, "res_line") and len(net.res_line) > 0:
-                for edge_id, line_idx in line_index_by_edge_id.items():
+                for node_id, line_idx in line_index_by_node_id.items():
                     if line_idx not in net.res_line.index:
                         continue
                     loading = _to_optional_float(net.res_line.loc[line_idx].get("loading_percent", None))
                     if loading is None:
                         continue
                     if loading > 100.0:
-                        msg = f"Line overload '{edge_id}': loading_percent={loading} > 100"
+                        msg = f"Line overload '{node_id}': loading_percent={loading} > 100"
                         warnings.append(msg)
-                        element_status[edge_id] = CreationStatus(
-                            element_id=edge_id,
+                        element_status[node_id] = CreationStatus(
+                            element_id=node_id,
                             element_type="line",
                             success=False,
                             error=msg,
@@ -553,7 +552,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
             motor_node_ids=motor_node_ids,
             shunt_node_ids=shunt_node_ids,
             storage_node_ids=storage_node_ids,
-            line_edge_ids=line_edge_ids,
+            line_edge_ids=line_node_ids,
             trafo_node_ids=transformer_node_ids,
             trafo3w_node_ids=trafo3w_node_ids,
             load_index_by_node_id=load_index_by_node_id,
@@ -562,7 +561,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
             motor_index_by_node_id=motor_index_by_node_id,
             shunt_index_by_node_id=shunt_index_by_node_id,
             storage_index_by_node_id=storage_index_by_node_id,
-            line_index_by_edge_id=line_index_by_edge_id,
+            line_index_by_edge_id=line_index_by_node_id,
             trafo_index_by_node_id=trafo_index_by_node_id,
             trafo3w_index_by_node_id=trafo3w_index_by_node_id,
         )
