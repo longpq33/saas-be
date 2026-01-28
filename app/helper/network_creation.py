@@ -645,6 +645,20 @@ def _add_lines_from_edges(
     line_edges: List[Tuple[int, str, Dict[str, Any]]] = []
     failed: List[CreationStatus] = []
 
+    def _to_int(v: Any, default: int) -> int:
+        try:
+            i = int(v)
+        except (TypeError, ValueError):
+            return default
+        return i
+
+    def _to_float(v: Any, default: float) -> float:
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return default
+        return f
+
     for e in edges:
         edge_id = e.get("id", "")
         src = e.get("source")
@@ -684,17 +698,87 @@ def _add_lines_from_edges(
             continue
 
         edge_data = e.get("data") or {}
-        std_type = str(edge_data.get("std_type", "NAYY 4x50 SE"))
-        length_km = float(edge_data.get("length_km", 1.0))
+
+        # Common line fields
+        name = str(edge_data.get("name", "")) or None
+        length_km = _to_float(edge_data.get("length_km"), 1.0)
         in_service = bool(edge_data.get("in_service", True))
+        parallel = _to_int(edge_data.get("parallel"), 1)
+        df = _to_float(edge_data.get("df"), 1.0)
+
+        if length_km <= 0:
+            failed.append(
+                CreationStatus(
+                    element_id=edge_id,
+                    element_type="line",
+                    success=False,
+                    error="length_km must be > 0",
+                )
+            )
+            continue
 
         from_bus = bus_index_by_node_id[src]
         to_bus = bus_index_by_node_id[tgt]
 
+        std_type_raw = edge_data.get("std_type")
+        std_type = str(std_type_raw).strip() if std_type_raw is not None else ""
+
         try:
-            line_idx = pp.create_line(
-                net, from_bus=from_bus, to_bus=to_bus, length_km=length_km, std_type=std_type, in_service=in_service
-            )
+            if std_type:
+                line_idx = pp.create_line(
+                    net,
+                    from_bus=from_bus,
+                    to_bus=to_bus,
+                    length_km=length_km,
+                    std_type=std_type,
+                    name=name,
+                    parallel=parallel,
+                    df=df,
+                    in_service=in_service,
+                )
+            else:
+                # Custom parameters path
+                r_ohm_per_km = edge_data.get("r_ohm_per_km")
+                x_ohm_per_km = edge_data.get("x_ohm_per_km")
+                c_nf_per_km = edge_data.get("c_nf_per_km")
+                max_i_ka = edge_data.get("max_i_ka")
+
+                missing_fields = [
+                    f
+                    for f, v in (
+                        ("r_ohm_per_km", r_ohm_per_km),
+                        ("x_ohm_per_km", x_ohm_per_km),
+                        ("c_nf_per_km", c_nf_per_km),
+                        ("max_i_ka", max_i_ka),
+                    )
+                    if v is None
+                ]
+                if missing_fields:
+                    failed.append(
+                        CreationStatus(
+                            element_id=edge_id,
+                            element_type="line",
+                            success=False,
+                            error=f"Missing line parameters: {', '.join(missing_fields)}",
+                        )
+                    )
+                    continue
+
+                line_idx = pp.create_line_from_parameters(
+                    net,
+                    from_bus=from_bus,
+                    to_bus=to_bus,
+                    length_km=length_km,
+                    r_ohm_per_km=_to_float(r_ohm_per_km, 0.0),
+                    x_ohm_per_km=_to_float(x_ohm_per_km, 0.0),
+                    c_nf_per_km=_to_float(c_nf_per_km, 0.0),
+                    max_i_ka=_to_float(max_i_ka, 0.0),
+                    name=name,
+                    parallel=parallel,
+                    df=df,
+                    in_service=in_service,
+                )
+
             line_edges.append((int(line_idx), edge_id, edge_data))
         except Exception as e:  # noqa: BLE001
             failed.append(

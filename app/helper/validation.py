@@ -124,6 +124,7 @@ def _validate_network(
                     ValidationError(
                         element_id="",
                         element_type="network",
+                        element_name=None,
                         field="islanding",
                         message="Island detected without ext_grid (slack). Add ext_grid to each island or connect islands.",
                     )
@@ -135,6 +136,10 @@ def _validate_network(
                         ValidationError(
                             element_id=some_bus,
                             element_type="bus",
+                            element_name=next(
+                                ((n.get("data") or {}).get("name") for n in nodes if n.get("id") == some_bus),
+                                None,
+                            ),
                             field="islanding",
                             message="This bus is in an island without ext_grid",
                         )
@@ -162,12 +167,14 @@ def _validate_network(
             continue
         node_id = node.get("id", "")
         data = node.get("data") or {}
+        node_name = data.get("name")
         vn_kv = _as_float(data.get("vn_kv", None))
         if vn_kv is None:
             errors.append(
                 ValidationError(
                     element_id=node_id,
                     element_type="bus",
+                    element_name=node_name,
                     field="vn_kv",
                     message="vn_kv must be a number",
                 )
@@ -177,6 +184,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="bus",
+                    element_name=node_name,
                     field="vn_kv",
                     message="vn_kv must be > 0",
                 )
@@ -194,6 +202,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type=node_type,
+                    element_name=data.get("name"),
                     field="busId",
                     message="busId is required",
                 )
@@ -203,6 +212,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type=node_type,
+                    element_name=data.get("name"),
                     field="busId",
                     message=f"busId '{bus_id}' does not exist",
                 )
@@ -216,6 +226,7 @@ def _validate_network(
                     ValidationError(
                         element_id=node_id,
                         element_type=node_type,
+                        element_name=data.get("name"),
                         field="p_mw",
                         message="p_mw must be a number",
                     )
@@ -233,6 +244,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="transformer",
+                    element_name=data.get("name"),
                     field="hvBusId",
                     message="hvBusId is required",
                 )
@@ -242,6 +254,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="transformer",
+                    element_name=data.get("name"),
                     field="hvBusId",
                     message=f"hvBusId '{hv_bus_id}' does not exist",
                 )
@@ -252,6 +265,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="transformer",
+                    element_name=data.get("name"),
                     field="lvBusId",
                     message="lvBusId is required",
                 )
@@ -261,6 +275,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="transformer",
+                    element_name=data.get("name"),
                     field="lvBusId",
                     message=f"lvBusId '{lv_bus_id}' does not exist",
                 )
@@ -272,6 +287,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="transformer",
+                    element_name=data.get("name"),
                     field="std_type",
                     message="std_type is required",
                 )
@@ -290,6 +306,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="hvBusId",
                     message="hvBusId is required",
                 )
@@ -299,6 +316,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="hvBusId",
                     message=f"hvBusId '{hv_bus_id}' does not exist",
                 )
@@ -309,6 +327,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="mvBusId",
                     message="mvBusId is required",
                 )
@@ -318,6 +337,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="mvBusId",
                     message=f"mvBusId '{mv_bus_id}' does not exist",
                 )
@@ -328,6 +348,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="lvBusId",
                     message="lvBusId is required",
                 )
@@ -337,6 +358,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="lvBusId",
                     message=f"lvBusId '{lv_bus_id}' does not exist",
                 )
@@ -348,6 +370,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="trafo3w",
+                    element_name=data.get("name"),
                     field="std_type",
                     message="std_type is required",
                 )
@@ -368,6 +391,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="switch",
+                    element_name=data.get("name"),
                     field="busId",
                     message="busId is required",
                 )
@@ -377,6 +401,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="switch",
+                    element_name=data.get("name"),
                     field="busId",
                     message=f"busId '{bus_id}' does not exist",
                 )
@@ -387,6 +412,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="switch",
+                    element_name=data.get("name"),
                     field="elementId",
                     message="elementId is required",
                 )
@@ -397,6 +423,7 @@ def _validate_network(
                 ValidationError(
                     element_id=node_id,
                     element_type="switch",
+                    element_name=data.get("name"),
                     field="elementType",
                     message=f"elementType must be 'line', 'trafo', or 'bus', got '{element_type}'",
                 )
@@ -414,6 +441,7 @@ def _validate_network(
                 ValidationError(
                     element_id=edge_id,
                     element_type="line",
+                    element_name=edge_data.get("name"),
                     field="std_type",
                     message="std_type is required",
                 )
@@ -424,6 +452,7 @@ def _validate_network(
                 ValidationError(
                     element_id=edge_id,
                     element_type="line",
+                    element_name=edge_data.get("name"),
                     field="length_km",
                     message="length_km must be a number",
                 )
@@ -433,6 +462,7 @@ def _validate_network(
                 ValidationError(
                     element_id=edge_id,
                     element_type="line",
+                    element_name=edge_data.get("name"),
                     field="length_km",
                     message="length_km must be > 0",
                 )
@@ -444,6 +474,7 @@ def _validate_network(
             ValidationError(
                 element_id="",
                 element_type="network",
+                element_name=None,
                 field="ext_grid",
                 message="At least one ext_grid is required",
             )

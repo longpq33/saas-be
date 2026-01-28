@@ -116,6 +116,7 @@ def simulate_from_reactflow(request: SimulateRequest) -> SimulateResponse:
                 ValidationError(
                     element_id="",
                     element_type="network",
+                    element_name=None,
                     field="bus",
                     message="At least one bus is required",
                 )
