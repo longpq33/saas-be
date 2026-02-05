@@ -41,6 +41,10 @@ class ReactFlowNode(BaseModel):
         "shunt",
         "storage",
         "trafo3w",
+        "dc_bus",
+        "dcline",
+        "dc_load",
+        "dc_source",
     ]
     data: Dict[str, Any]
 
@@ -164,6 +168,6 @@ class SimulateResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     errors: Dict[str, List[ValidationError]] = Field(default_factory=dict)
     element_status: Dict[str, CreationStatus] = Field(default_factory=dict)
-    results: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    results: Dict[str, Any] = Field(default_factory=dict)
     network: Optional[Dict[str, Any]] = None
 

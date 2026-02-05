@@ -1,122 +1,104 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional
-
 import math
+from typing import Any, Dict, Literal, Optional
 
 
-def _sanitize_json_floats(obj: Any) -> Any:
-    if isinstance(obj, float):
-        return obj if math.isfinite(obj) else None
-    if isinstance(obj, list):
-        return [_sanitize_json_floats(x) for x in obj]
-    if isinstance(obj, dict):
-        return {k: _sanitize_json_floats(v) for k, v in obj.items()}
-    return obj
-
-
-def _df_to_records(df: Any) -> list[dict[str, Any]]:
-    # pandapower uses pandas DataFrames; keep this helper loose-typed
-    try:
-        records = df.reset_index().to_dict("records")
-    except Exception:  # noqa: BLE001
-        try:
-            records = df.to_dict("records")
-        except Exception:  # noqa: BLE001
-            return []
-    return _sanitize_json_floats(records)
-
-
-def export_network(net: Any, mode: str = "none") -> Optional[Dict[str, Any]]:
+def export_network(net: Any, mode: Literal["none", "summary", "tables"] = "none") -> Optional[Dict[str, Any]]:
+    """
+    Export pandapower network theo mức độ.
+    - none: không trả
+    - summary: meta + counts
+    - tables: thêm element tables + results (nếu có)
+    """
     if mode == "none":
         return None
 
-    meta: Dict[str, Any] = {
-        "converged": bool(getattr(net, "converged", False)),
-        "sn_mva": getattr(net, "sn_mva", None),
-        "f_hz": getattr(net, "f_hz", None),
-    }
-
-    if mode == "summary":
-        counts: Dict[str, int] = {}
-        for name in (
-            "bus",
-            "line",
-            "trafo",
-            "trafo3w",
-            "load",
-            "gen",
-            "sgen",
-            "ext_grid",
-            "switch",
-            "shunt",
-            "motor",
-            "storage",
-        ):
-            try:
-                tbl = getattr(net, name)
-                counts[name] = int(len(tbl))
-            except Exception:  # noqa: BLE001
-                counts[name] = 0
-
-        meta["counts"] = counts
-        return {"meta": _sanitize_json_floats(meta)}
-
-    # mode == "tables"
-    tables: Dict[str, Any] = {}
-    res_tables: Dict[str, Any] = {}
-
-    element_table_names: Iterable[str] = (
+    payload: Dict[str, Any] = {"meta": {"counts": {}}}
+    # Đếm sơ bộ các bảng phổ biến nếu tồn tại
+    for tbl in (
         "bus",
         "line",
-        "trafo",
-        "trafo3w",
         "load",
+        "ext_grid",
         "gen",
         "sgen",
-        "ext_grid",
+        "trafo",
+        "trafo3w",
         "switch",
         "shunt",
         "motor",
         "storage",
-    )
-    result_table_names: Iterable[str] = (
-        "res_bus",
-        "res_line",
-        "res_trafo",
-        "res_trafo3w",
-        "res_load",
-        "res_gen",
-        "res_sgen",
-        "res_ext_grid",
-        "res_switch",
-        "res_shunt",
-        "res_motor",
-        "res_storage",
-    )
+    ):
+        if hasattr(net, tbl):
+            try:
+                payload["meta"]["counts"][tbl] = int(len(getattr(net, tbl)))
+            except Exception:  # noqa: BLE001
+                pass
 
-    for name in element_table_names:
-        try:
-            df = getattr(net, name)
-            tables[name] = _df_to_records(df)
-        except Exception:  # noqa: BLE001
-            pass
+    if mode == "summary":
+        return payload
 
-    for name in result_table_names:
-        try:
-            df = getattr(net, name)
-            # res_* might not exist if not converged or element not present
-            if df is None:
-                continue
-            res_tables[name] = _df_to_records(df)
-        except Exception:  # noqa: BLE001
-            pass
+    # mode == "tables"
+    # Trả về dạng list các bản ghi (records) để frontend dễ render bảng
+    tables: Dict[str, Any] = {}
+    results: Dict[str, Any] = {}
+    for tbl in (
+        "bus",
+        "line",
+        "load",
+        "ext_grid",
+        "gen",
+        "sgen",
+        "trafo",
+        "trafo3w",
+        "switch",
+        "shunt",
+        "motor",
+        "storage",
+    ):
+        if hasattr(net, tbl):
+            try:
+                df = getattr(net, tbl)
+                # Reset index để có cột index/id rõ ràng cho frontend
+                # Replace NaN với None để JSON serialize được (NaN không hợp lệ trong JSON)
+                records = df.reset_index().replace({float("nan"): None}).to_dict(orient="records")
+                tables[tbl] = _clean_nan_records(records)
+            except Exception:  # noqa: BLE001
+                pass
 
-    meta["counts"] = {k: len(v) for k, v in tables.items() if isinstance(v, list)}
+    for res_tbl in ("res_bus", "res_line", "res_load", "res_gen", "res_sgen", "res_trafo", "res_trafo3w"):
+        if hasattr(net, res_tbl):
+            try:
+                df = getattr(net, res_tbl)
+                # Replace NaN với None để JSON serialize được
+                records = df.reset_index().replace({float("nan"): None}).to_dict(orient="records")
+                results[res_tbl] = _clean_nan_records(records)
+            except Exception:  # noqa: BLE001
+                pass
 
-    return {
-        "meta": _sanitize_json_floats(meta),
-        "tables": tables,
-        "results": res_tables,
-    }
+    payload["tables"] = tables
+    payload["results"] = results
+    return payload
+
+
+def _clean_nan_records(records: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """
+    Clean NaN values trong list các dict records để JSON serialize được.
+    Replace NaN, inf, -inf với None (sẽ thành null trong JSON).
+    """
+    cleaned = []
+    for rec in records:
+        cleaned_rec: Dict[str, Any] = {}
+        for k, v in rec.items():
+            if isinstance(v, float):
+                if math.isnan(v) or math.isinf(v):
+                    cleaned_rec[k] = None
+                else:
+                    cleaned_rec[k] = v
+            else:
+                cleaned_rec[k] = v
+        cleaned.append(cleaned_rec)
+    return cleaned
+
 
